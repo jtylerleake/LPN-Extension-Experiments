@@ -254,3 +254,33 @@ non-PyTorch model:
   testable in the CPU image (see `test_run_exp4_resume_*`). When batching
   with `vmap`, pad a short final batch to the full size so there's one
   compile, not two.
+
+## 7. Colab CLI (`colab`, from WSL) instead of browser notebooks
+
+GPU runs go through `scripts/colab_runtime.py`, a WSL-side wrapper around
+the Colab CLI (Linux/macOS only, so it runs in WSL against `/mnt/c/...`).
+Things that shaped it:
+
+- **`colab exec` times out after 30 s by default and is tied to the CLI
+  connection.** Anything long must be a detached job on the VM: its own
+  process group (`start_new_session=True`), log to a file, write the exit
+  code to a file. Poll the files; don't hold an exec open.
+- **The session's kernel persists across `colab exec` calls.** Never import
+  project code *in* the kernel: after a re-sync, `sys.modules` keeps serving
+  the old code. Run every script as a subprocess of the kernel instead,
+  which also sidesteps §1's tqdm-in-kernel issues.
+- **Don't trust the CLI's exit status for remote results.** Remote snippets
+  print a sentinel (`__RC__=<n>`, `__JSON__=<payload>`) that the driver
+  parses. Wrap each snippet in a function: it can `return` early (no
+  `SystemExit` in the kernel) and leaves no globals behind.
+- **Embed arguments in generated code with `repr()`, and in shell commands
+  with `shlex.join`/`quote`.** Never use string formatting with raw args.
+- **Sync the working tree, not a git clone.** A tarball of
+  tracked + untracked-not-ignored files includes uncommitted edits. Stamp it
+  with a manifest (commit, dirty flag, hash) that each run logs. Refuse to
+  replace code under a running job: lazy imports would read the new files.
+- **`colab drivemount`, `auth`, `repl`, and `console` need a human at a
+  TTY.** An agent can't mount Drive, so the default output root is VM-local
+  (`/content/outputs`, then `fetch`), and Drive is opt-in (`--drive`) after
+  the user mounts it.
+- **Creating a VM spends compute units.** Ask before `up`, and always `down`.

@@ -67,7 +67,7 @@ class LossTerms:
     kl: torch.Tensor
 
     def as_floats(self) -> dict[str, float]:
-        return {k: float(v) for k, v in vars(self).items()}
+        return {k: v.item() for k, v in vars(self).items()}
 
 
 def clip_per_row(grad: torch.Tensor, max_norm: float) -> torch.Tensor:

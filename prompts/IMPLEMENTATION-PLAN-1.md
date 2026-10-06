@@ -97,7 +97,7 @@ Each result row goes to `metrics.jsonl` on Drive with a fingerprint, so a resume
 **Keep and adapt:**
 - `utils/seeding.py`
 - `utils/logging_utils.py` (drop the HF-noise helper)
-- `utils/colab.py` (rename the Drive root)
+- `utils/runtime.py` replaces `utils/colab.py` (device, AMP dtype, output root)
 - the core of `resume.py`
 - `compile_requirements.ps1`
 - the Docker files

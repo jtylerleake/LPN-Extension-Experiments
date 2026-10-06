@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> dict:
         scaler.scale(terms.total).backward()
         scaler.step(opt)
         scaler.update()
-        losses.append(float(terms.total))
+        losses.append(terms.total.item())
 
     sec_per_step = timed(train_step, sync, args.steps)
     print(f"train: {1 / sec_per_step:.1f} steps/s at batch {args.batch_size} "
