@@ -1,0 +1,10 @@
+# Architecture 1 (tile only): encoder + decoder + MLP head trained jointly.
+name: arch1
+loss:
+  lambda_exec: 1.0
+  lambda_commit: 0.1
+  beta: 1.0e-4
+train:
+  mode: joint
+  steps: 150000
+  batch_size: 256

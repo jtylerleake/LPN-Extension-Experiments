@@ -5,18 +5,12 @@
 
 # --- ML core ---
 torch
-transformers
-peft
-accelerate
-bitsandbytes
-datasets
-safetensors
 
 # --- science / numerics ---
 numpy
 pandas
 
-# --- plotting (runs locally in Docker against synced metrics, not weights) ---
+# --- plotting ---
 matplotlib
 seaborn
 
@@ -25,7 +19,7 @@ pydantic
 pyyaml
 tqdm
 
-# --- dev tooling (also fine to ship in the same image for a single dev env) ---
+# --- dev tooling ---
 ruff
 pytest
 pip-tools

@@ -3,13 +3,20 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lora_experiments"
+name = "lpn_interp"
 version = "0.1.0"
-description = "Infrastructure for LoRA fine-tuning experiments (rank ablation, matrix-application study, method comparison, test-time tuning)."
+description = "Latent Program Networks with an interpretable program-readout head (Pattern-2D, PyTorch)."
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+lpn_interp = ["configs/*.yaml"]
+
 [tool.ruff]
-line-length = 100
+line-length = 110
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

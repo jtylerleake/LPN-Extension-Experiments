@@ -1,0 +1,23 @@
+# Smoke-test mirror of probe.yaml: same structure, capped numbers.
+name: probe_mini
+loss:
+  lambda_exec: 1.0
+  lambda_commit: 0.1
+  beta: 0.0001
+train:
+  mode: probe
+  init_checkpoint: outputs/vanilla_mini/checkpoint.pt
+  steps: 200
+  batch_size: 32
+  log_every: 20
+  eval_every: 100
+  checkpoint_every: 100
+  warmup_steps: 20
+latent_opt:
+  lambda_exec: 0.0
+  lambda_commit: 0.0
+  steps: 10
+eval:
+  num_tasks: 64
+  batch_size: 64
+  trajectory_tasks: 4

@@ -2,12 +2,6 @@
 # (pip-compile against base.in) to get a real locked/pinned set. Until then
 # this just mirrors base.in unpinned so `docker compose build` works.
 torch
-transformers
-peft
-accelerate
-bitsandbytes
-datasets
-safetensors
 numpy
 pandas
 matplotlib

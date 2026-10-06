@@ -2,12 +2,6 @@
 # Installed on top of Colab's preinstalled, CUDA-matched torch — deliberately
 # does NOT pin torch itself (installing a different torch build would break
 # Colab's CUDA setup).
-transformers
-peft
-accelerate
-bitsandbytes
-datasets
-safetensors
 numpy
 pandas
 matplotlib
