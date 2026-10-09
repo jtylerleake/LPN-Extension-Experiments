@@ -5,13 +5,14 @@ The `colab` CLI only exists on Linux/macOS, so this driver runs in WSL
 against the Windows checkout (/mnt/c/...). Stdlib only -- no project
 dependencies are needed locally.
 
-    python3 scripts/colab_runtime.py up --gpu A100          # new VM + sync code + check deps
-    python3 scripts/colab_runtime.py run -- -m pytest -q     # foreground, output streamed
-    python3 scripts/colab_runtime.py run -- scripts/gpu_smoke.py
-    python3 scripts/colab_runtime.py launch arch1 -- scripts/train.py --config ...   # background job
-    python3 scripts/colab_runtime.py jobs | logs arch1 --follow | kill arch1
-    python3 scripts/colab_runtime.py fetch                   # VM outputs -> ./outputs/
-    python3 scripts/colab_runtime.py down                    # release the VM (stops billing)
+    python3 colab/colab_runtime.py up --gpu A100 --drive  # new VM + mount Drive + sync code + check deps
+    python3 colab/colab_runtime.py run -- -m pytest -q     # foreground, output streamed
+    python3 colab/colab_runtime.py launch stage1 -- scripts/train.py --config src/configs/stage1_frozen.yaml
+    python3 colab/colab_runtime.py watch                   # poll jobs; on VM loss, prints recovery steps
+    python3 colab/colab_runtime.py jobs | logs stage1 --follow | kill stage1
+    python3 colab/colab_runtime.py resume                  # after a disconnect, on a fresh `up`
+    python3 colab/colab_runtime.py fetch                   # outputs -> ./outputs/
+    python3 colab/colab_runtime.py down                    # release the VM (stops billing)
 
 How it works:
 - `sync` tars the working tree (tracked + untracked-but-not-ignored files under
@@ -24,9 +25,14 @@ How it works:
 - `colab exec` times out after 30 s by default and dies with the connection,
   so anything long goes through `launch`: a detached job (own process group)
   writing JOBS_DIR/<name>.log, with its exit code in <name>.exit when done.
-- Jobs get LPN_OUTPUT_ROOT in their environment (VM-local /content/outputs,
-  or Google Drive with --drive after you've run `colab drivemount` yourself;
-  it's interactive). `fetch` pulls an output directory back to ./outputs/.
+- Jobs get LPN_OUTPUT_ROOT in their environment: Google Drive for sessions
+  started with `up --drive` (or after `mount`), else VM-local /content/outputs.
+  `fetch` pulls an output directory back to ./outputs/.
+- Resume after a disconnect: every `launch` is also recorded locally in
+  .colab/state.json, which outlives the VM. `resume` relaunches each
+  recorded job that hasn't finished, with the same command. The scripts
+  continue from their own checkpoints on Drive, so only work since the last
+  checkpoint is redone.
 """
 from __future__ import annotations
 
@@ -42,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-SYNC_PATHS = ["src", "scripts", "tests", "pyproject.toml", "docker/requirements/colab.txt"]
+SYNC_PATHS = ["src", "scripts", "tests", "colab", "pyproject.toml"]
 DEFAULT_SESSION = "lpn"
 
 REMOTE_ROOT = "/content/lpn"
@@ -51,12 +57,8 @@ VM_OUTPUTS = "/content/outputs"
 DRIVE_MOUNT = "/content/drive"
 DRIVE_OUTPUTS = f"{DRIVE_MOUNT}/MyDrive/lpn_interp_outputs"
 
-# import name -> pip name; Colab preinstalls all of these today, `setup` only
-# installs whatever is missing (never upgrades/downgrades Colab's own builds).
-REQUIRED_MODULES = {
-    "torch": "torch", "numpy": "numpy", "pandas": "pandas", "matplotlib": "matplotlib",
-    "seaborn": "seaborn", "pydantic": "pydantic", "yaml": "pyyaml", "tqdm": "tqdm", "pytest": "pytest",
-}
+# What the VM must have; `setup` hands this file to colab/vm_setup.py on the VM.
+VM_REQUIREMENTS = "colab/requirements.txt"
 
 RC_TAG = "__RC__="
 JSON_TAG = "__JSON__="
@@ -66,7 +68,7 @@ JSON_TAG = "__JSON__="
 
 def colab(session: str | None, *args: str, check: bool = True) -> int:
     cmd = ["colab", *args] + (["-s", session] if session else [])
-    rc = subprocess.run(cmd).returncode
+    rc = subprocess.run(cmd, check=False).returncode
     if check and rc != 0:
         sys.exit(f"`{' '.join(cmd)}` failed with exit code {rc}")
     return rc
@@ -121,7 +123,7 @@ _ENV = """
 import os, sys
 def job_env(output_root):
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.path.join(REMOTE_ROOT, "src") + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = REMOTE_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     env["LPN_OUTPUT_ROOT"] = output_root
     env["PYTHONUNBUFFERED"] = "1"
     env.pop("MPLBACKEND", None)  # the kernel's inline backend doesn't exist outside it
@@ -173,24 +175,6 @@ os.remove(TARBALL)
 with open(os.path.join(REMOTE_ROOT, "BUNDLE.json"), "w") as f:
     json.dump(MANIFEST, f)
 print("synced", MANIFEST["files"], "files to", REMOTE_ROOT, "(commit", MANIFEST["commit"][:8] + ("+dirty" if MANIFEST["dirty"] else "") + ")")
-print("__RC__=0")
-"""
-
-SETUP = """
-import importlib, subprocess, sys
-missing = []
-for module, pip_name in REQUIRED.items():
-    try:
-        m = importlib.import_module(module)
-        print(f"  {module:<11} {getattr(m, '__version__', '?')}")
-    except ImportError:
-        missing.append(pip_name)
-if missing:
-    print("installing missing:", " ".join(missing))
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *missing], check=True)
-import pydantic, torch
-assert int(pydantic.VERSION.split(".")[0]) >= 2, "pydantic v2 required"
-print("  cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
 print("__RC__=0")
 """
 
@@ -302,8 +286,44 @@ def build_bundle(dest: Path) -> dict:
             "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
 
 
-def output_root(args) -> str:
-    return DRIVE_OUTPUTS if args.drive else VM_OUTPUTS
+# --------------------------------------------------------------------------- local state (survives the VM)
+#
+# .colab/state.json remembers each session's settings (gpu, drive) and every
+# job launched on it (argv, drive, last known state). The VM forgets all of
+# this when it's reclaimed; this file is what lets `resume` relaunch the
+# unfinished jobs on a fresh VM. The jobs themselves resume from their own
+# checkpoints on Drive (see src/training/train.py).
+
+STATE_FILE = REPO / ".colab" / "state.json"
+INTERRUPTED_RC = "75"  # train.py: stopped by SIGTERM after checkpointing
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    return {"sessions": {}, "jobs": {}}
+
+
+def save_state(state: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp.replace(STATE_FILE)
+
+
+def session_settings(session: str) -> dict:
+    return load_state()["sessions"].get(session, {})
+
+
+def use_drive(args) -> bool:
+    """--drive / --no-drive win; otherwise the session's setting from `up --drive` / `mount`."""
+    if getattr(args, "drive", None) is not None:
+        return args.drive
+    return session_settings(args.session).get("drive", False)
+
+
+def output_root(drive: bool) -> str:
+    return DRIVE_OUTPUTS if drive else VM_OUTPUTS
 
 
 def require_ok(rc: int) -> None:
@@ -311,14 +331,71 @@ def require_ok(rc: int) -> None:
         sys.exit(rc)
 
 
+def remote_jobs(session: str) -> list[dict] | None:
+    """Job rows from the VM, or None if the session can't be reached."""
+    rc, payloads = remote_python(session, snippet(JOBS, JOBS_DIR=JOBS_DIR), echo=False)
+    return payloads[0] if rc == 0 and payloads else None
+
+
+def record_remote_states(session: str, rows: list[dict]) -> None:
+    state = load_state()
+    jobs = state["jobs"].get(session, {})
+    for row in rows:
+        if row["name"] in jobs:
+            jobs[row["name"]]["state"] = row["state"]
+    save_state(state)
+
+
+DRIVE_CHECK = """
+import os
+print("__JSON__=" + ("true" if os.path.isdir(os.path.join(DRIVE_MOUNT, "MyDrive")) else "false"))
+print("__RC__=0")
+"""
+
+
+def drive_mounted(session: str) -> bool:
+    rc, payloads = remote_python(session, snippet(DRIVE_CHECK, DRIVE_MOUNT=DRIVE_MOUNT), echo=False)
+    return rc == 0 and bool(payloads and payloads[0])
+
+
+def ensure_drive(session: str) -> None:
+    """Mount Drive if it isn't. `colab drivemount` needs a human (browser consent),
+    so this only works when run from an interactive terminal."""
+    if drive_mounted(session):
+        return
+    if not sys.stdin.isatty():
+        sys.exit(f"Drive isn't mounted on '{session}'. In your WSL terminal run:\n"
+                 f"  python3 colab/colab_runtime.py -s {session} mount")
+    print("Mounting Google Drive: approve the consent prompt below.")
+    colab(session, "drivemount", DRIVE_MOUNT)
+    if not drive_mounted(session):
+        sys.exit("Drive still isn't mounted; try again with `mount`.")
+    print(f"Drive mounted; outputs go to {DRIVE_OUTPUTS}")
+
+
 # --------------------------------------------------------------------------- commands
 
 def cmd_up(args) -> None:
     new = ["new", "--gpu", args.gpu] if args.gpu != "cpu" else ["new"]
     colab(args.session, *new, *(["--high-mem"] if args.high_mem else []))
+    state = load_state()
+    state["sessions"][args.session] = {"gpu": args.gpu, "high_mem": args.high_mem, "drive": args.drive}
+    save_state(state)
+    if args.drive:
+        ensure_drive(args.session)
     cmd_sync(args)
     cmd_setup(args)
+    pending = [n for n, j in state["jobs"].get(args.session, {}).items() if j.get("state") != "done"]
+    if pending:
+        print(f"\nUnfinished jobs from before: {', '.join(pending)}. Run `resume` to relaunch them.")
     print(f"\nSession '{args.session}' ready. Remember `down` when finished (idle VMs burn compute units).")
+
+
+def cmd_mount(args) -> None:
+    ensure_drive(args.session)
+    state = load_state()
+    state["sessions"].setdefault(args.session, {})["drive"] = True
+    save_state(state)
 
 
 def cmd_sync(args) -> None:
@@ -334,7 +411,10 @@ def cmd_sync(args) -> None:
 
 
 def cmd_setup(args) -> None:
-    require_ok(remote_python(args.session, snippet(SETUP, REQUIRED=REQUIRED_MODULES), timeout=600)[0])
+    """Check/install the VM's packages from colab/requirements.txt (needs the code synced first)."""
+    code = snippet(FOREGROUND, ARGV=["colab/vm_setup.py", VM_REQUIREMENTS], REMOTE_ROOT=REMOTE_ROOT,
+                   OUTPUT_ROOT=VM_OUTPUTS, DRIVE_MOUNT=DRIVE_MOUNT, SESSION=args.session)
+    require_ok(remote_python(args.session, code, timeout=600)[0])
 
 
 def cmd_run(args) -> None:
@@ -342,30 +422,130 @@ def cmd_run(args) -> None:
         sys.exit("nothing to run: pass a script and its args after --")
     if not args.no_sync:
         cmd_sync(args)
-    code = snippet(FOREGROUND, ARGV=args.argv, REMOTE_ROOT=REMOTE_ROOT, OUTPUT_ROOT=output_root(args),
+    code = snippet(FOREGROUND, ARGV=args.argv, REMOTE_ROOT=REMOTE_ROOT, OUTPUT_ROOT=output_root(use_drive(args)),
                    DRIVE_MOUNT=DRIVE_MOUNT, SESSION=args.session)
     require_ok(remote_python(args.session, code, timeout=args.timeout)[0])
+
+
+def launch_job(session: str, name: str, argv: list[str], drive: bool) -> None:
+    code = snippet(LAUNCH, NAME=name, ARGV=argv, REMOTE_ROOT=REMOTE_ROOT, JOBS_DIR=JOBS_DIR,
+                   OUTPUT_ROOT=output_root(drive), DRIVE_MOUNT=DRIVE_MOUNT, SESSION=session)
+    require_ok(remote_python(session, code)[0])
+    state = load_state()
+    state["jobs"].setdefault(session, {})[name] = {
+        "argv": argv, "drive": drive, "state": "running",
+        "launched": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    save_state(state)
 
 
 def cmd_launch(args) -> None:
     if not args.argv:
         sys.exit("nothing to launch: pass a script and its args after --")
+    drive = use_drive(args)
+    if not drive:
+        print("note: outputs go to the VM's own disk, so this job can't resume after the VM is lost. "
+              "Use `up --drive` / `mount` (or --drive) for long runs.")
     if not args.no_sync:
         cmd_sync(args)
-    code = snippet(LAUNCH, NAME=args.name, ARGV=args.argv, REMOTE_ROOT=REMOTE_ROOT, JOBS_DIR=JOBS_DIR,
-                   OUTPUT_ROOT=output_root(args), DRIVE_MOUNT=DRIVE_MOUNT, SESSION=args.session)
-    require_ok(remote_python(args.session, code)[0])
-    print(f"follow with: python3 scripts/colab_runtime.py logs {args.name} --follow")
+    launch_job(args.session, args.name, args.argv, drive)
+    print(f"follow with: python3 colab/colab_runtime.py logs {args.name} --follow")
 
 
 def cmd_jobs(args) -> None:
-    rc, payloads = remote_python(args.session, snippet(JOBS, JOBS_DIR=JOBS_DIR), echo=False)
-    require_ok(rc)
-    rows = payloads[0] if payloads else []
-    if not rows:
-        print("no jobs")
+    rows = remote_jobs(args.session)
+    if rows is None:
+        sys.exit(f"couldn't reach session '{args.session}'")
+    record_remote_states(args.session, rows)
+    remote_names = {r["name"] for r in rows}
     for r in rows:
         print(f"{r['name']:<16} {r['state']:<12} {r['started']}  {r['argv']}\n{'':<16} last: {r['last']}")
+    for name, job in load_state()["jobs"].get(args.session, {}).items():
+        if name not in remote_names:  # launched on an earlier VM
+            print(f"{name:<16} {'not on VM':<12} last known: {job['state']}  (`resume` relaunches unfinished jobs)")
+    if not rows and not load_state()["jobs"].get(args.session):
+        print("no jobs")
+
+
+def resume_decision(job: dict, remote_state: str | None, named: bool, include_failed: bool) -> str | None:
+    """Why a job should be skipped, or None to relaunch it. Pure, so it's unit-testable."""
+    state = remote_state or job.get("state", "")
+    if remote_state == "running":
+        return "still running"
+    if state == "done":
+        return "already done"
+    if state in ("killed", "exited(killed)") and not named:
+        return "was killed on purpose (name it to resume)"
+    if state.startswith("exited(") and state != f"exited({INTERRUPTED_RC})" and not (named or include_failed):
+        return f"failed ({state}); check `logs`, then name it or pass --include-failed"
+    return None  # no record on this VM (new VM), died, or interrupted after checkpointing
+
+
+def cmd_resume(args) -> None:
+    jobs = load_state()["jobs"].get(args.session, {})
+    if args.names:
+        unknown = set(args.names) - set(jobs)
+        if unknown:
+            sys.exit(f"no record of job(s): {', '.join(sorted(unknown))}")
+    rows = remote_jobs(args.session)
+    if rows is None:
+        sys.exit(f"couldn't reach session '{args.session}'; start one with `up` first")
+    record_remote_states(args.session, rows)
+    remote = {r["name"]: r["state"] for r in rows}
+    jobs = load_state()["jobs"].get(args.session, {})
+
+    todo = []
+    for name, job in jobs.items():
+        if args.names and name not in args.names:
+            continue
+        reason = resume_decision(job, remote.get(name), bool(args.names), args.include_failed)
+        if reason:
+            print(f"skip {name}: {reason}")
+        else:
+            todo.append(name)
+    if not todo:
+        print("nothing to resume")
+        return
+    if any(jobs[n]["drive"] for n in todo):
+        ensure_drive(args.session)
+    cmd_sync(args)
+    for name in todo:
+        print(f"relaunching {name}: {' '.join(jobs[name]['argv'])}")
+        launch_job(args.session, name, jobs[name]["argv"], jobs[name]["drive"])
+
+
+def cmd_forget(args) -> None:
+    state = load_state()
+    jobs = state["jobs"].get(args.session, {})
+    for name in args.names:
+        print(f"forgot {name}" if jobs.pop(name, None) else f"no record of {name}")
+    save_state(state)
+
+
+def cmd_watch(args) -> None:
+    """Poll every job until none is running. Each poll is kernel activity, which
+    also helps keep Colab from treating the session as idle."""
+    last: dict[str, str] = {}
+    while True:
+        rows = remote_jobs(args.session)
+        stamp = datetime.now().strftime("%H:%M:%S")
+        if rows is None:
+            settings = session_settings(args.session)
+            up = f"up --gpu {settings.get('gpu', 'A100')}" + (" --drive" if settings.get("drive") else "")
+            sys.exit(f"[{stamp}] lost contact with session '{args.session}' (VM reclaimed?). "
+                     "To pick up where it left off:\n"
+                     f"  python3 colab/colab_runtime.py -s {args.session} {up}\n"
+                     f"  python3 colab/colab_runtime.py -s {args.session} resume")
+        record_remote_states(args.session, rows)
+        watched = [r for r in rows if not args.names or r["name"] in args.names]
+        for r in watched:
+            if last.get(r["name"]) != r["state"] or r["state"] == "running":
+                print(f"[{stamp}] {r['name']:<16} {r['state']:<12} {r['last']}", flush=True)
+            last[r["name"]] = r["state"]
+        if not any(r["state"] == "running" for r in watched):
+            print(f"[{stamp}] no running jobs")
+            return
+        time.sleep(args.interval)
 
 
 def cmd_logs(args) -> None:
@@ -386,12 +566,16 @@ def cmd_logs(args) -> None:
 
 def cmd_kill(args) -> None:
     require_ok(remote_python(args.session, snippet(KILL, NAME=args.name, JOBS_DIR=JOBS_DIR))[0])
+    state = load_state()
+    if args.name in state["jobs"].get(args.session, {}):
+        state["jobs"][args.session][args.name]["state"] = "killed"
+        save_state(state)
 
 
 def cmd_fetch(args) -> None:
     remote = "/content/lpn_fetch.tar.gz"
     rc, _ = remote_python(args.session, snippet(
-        PACK, OUTPUT_ROOT=output_root(args), SUBDIR=args.subdir, TARBALL=remote,
+        PACK, OUTPUT_ROOT=output_root(use_drive(args)), SUBDIR=args.subdir, TARBALL=remote,
         NO_CHECKPOINTS=args.no_checkpoints), timeout=600)
     require_ok(rc)
     dest = (REPO / args.dest).resolve()
@@ -410,27 +594,32 @@ def cmd_down(args) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-s", "--session", default=DEFAULT_SESSION, help=f"colab session name (default {DEFAULT_SESSION})")
+    parser.add_argument("-s", "--session", default=DEFAULT_SESSION,
+                        help=f"colab session name (default {DEFAULT_SESSION})")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def with_drive(p):
-        p.add_argument("--drive", action="store_true",
-                       help=f"use {DRIVE_OUTPUTS} as the output root (needs `colab drivemount` first)")
+        p.add_argument("--drive", action=argparse.BooleanOptionalAction, default=None,
+                       help=f"output root {DRIVE_OUTPUTS} (default: the session's setting from `up --drive`/`mount`)")
         return p
 
-    p = sub.add_parser("up", help="create a session, sync code, check dependencies")
+    p = sub.add_parser("up", help="create a session, (mount Drive,) sync code, check dependencies")
     p.add_argument("--gpu", default="T4", help="T4, L4, G4, A100, H100, or cpu (default T4)")
     p.add_argument("--high-mem", action="store_true")
+    p.add_argument("--drive", action="store_true", help="mount Google Drive (interactive) and write outputs there")
     p.set_defaults(func=cmd_up)
+
+    sub.add_parser("mount", help="mount Google Drive on the session (interactive)").set_defaults(func=cmd_mount)
 
     p = sub.add_parser("sync", help="upload the working tree to the VM")
     p.add_argument("--force", action="store_true", help="sync even while jobs are running")
     p.set_defaults(func=cmd_sync)
 
-    sub.add_parser("setup", help="check/install Python dependencies on the VM").set_defaults(func=cmd_setup)
+    sub.add_parser("setup", help="check/install the VM's packages (colab/requirements.txt)").set_defaults(func=cmd_setup)
 
     p = with_drive(sub.add_parser("run", help="sync, then run `python -u ARGV...` in the foreground"))
-    p.add_argument("--timeout", type=float, default=3600.0, help="seconds (default 3600); use `launch` for long jobs")
+    p.add_argument("--timeout", type=float, default=3600.0,
+                   help="seconds (default 3600); use `launch` for long jobs")
     p.add_argument("--no-sync", action="store_true")
     p.add_argument("argv", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_run)
@@ -441,7 +630,21 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("argv", nargs=argparse.REMAINDER)
     p.set_defaults(func=cmd_launch)
 
-    sub.add_parser("jobs", help="list background jobs").set_defaults(func=cmd_jobs)
+    sub.add_parser("jobs", help="list background jobs (this VM's and earlier ones')").set_defaults(func=cmd_jobs)
+
+    p = sub.add_parser("resume", help="relaunch unfinished jobs (e.g. on a fresh VM after a disconnect)")
+    p.add_argument("names", nargs="*", help="only these jobs (also allows resuming killed/failed ones)")
+    p.add_argument("--include-failed", action="store_true", help="also relaunch jobs that exited with an error")
+    p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("forget", help="drop jobs from the local registry")
+    p.add_argument("names", nargs="+")
+    p.set_defaults(func=cmd_forget)
+
+    p = sub.add_parser("watch", help="poll jobs until none is running; says how to recover if the VM is lost")
+    p.add_argument("names", nargs="*")
+    p.add_argument("--interval", type=float, default=300.0, help="seconds between polls (default 300)")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("logs", help="show a job's log")
     p.add_argument("name")
@@ -450,7 +653,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--interval", type=float, default=20.0)
     p.set_defaults(func=cmd_logs)
 
-    p = sub.add_parser("kill", help="SIGTERM a running job")
+    p = sub.add_parser("kill", help="SIGTERM a running job (training checkpoints before exiting)")
     p.add_argument("name")
     p.set_defaults(func=cmd_kill)
 

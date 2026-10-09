@@ -37,3 +37,6 @@ Thumbs.db
 
 # Claude Code session state
 .claude/
+
+# colab_runtime.py local job registry
+.colab/

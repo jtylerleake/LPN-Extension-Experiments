@@ -1,0 +1,12 @@
+# Stage 1, architecture 2: the paper's pretrained LPN, frozen; the tile head h(z) and the
+# anchor head g(z) are trained (on the detached z). g's soft 4x4 anchor map replaces FIND.
+name: stage1_frozen_arch2
+model:
+  architecture: 2
+train:
+  mode: probe
+  init: pretrained
+  steps: 20000
+  batch_size: 256
+  lr: 1.0e-3
+  warmup_steps: 500

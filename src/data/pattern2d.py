@@ -1,4 +1,4 @@
-"""Simplified Pattern-2D task generation (PROJECT-SPEC.md section 3).
+"""Simplified Pattern-2D task generation (prompts/PROJECT-SPEC-1.md section 3).
 
 A task is one 2x2 color tile T (the program, colors 1-9) plus `num_pairs`
 (input, output) pairs on a 4x4 grid:
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import torch
 
-from lpn_interp.config import ANCHOR_COLOR, GRID_SIZE, TILE_SIZE
+from src.config import ANCHOR_COLOR, GRID_SIZE, TILE_SIZE
 
 TILE_COLORS = tuple(range(1, 10))  # no black tile cells
 NUM_TILE_CELLS = TILE_SIZE * TILE_SIZE

@@ -1,0 +1,8 @@
+# Extra packages for colab/check_port_parity.py only: it runs the authors'
+# original JAX/Flax LPN to compare against our PyTorch port. Nothing else in
+# the repo uses JAX. Same rules as requirements.txt (the check script applies them).
+
+jax             # preinstalled (Colab's CUDA build)
+flax
+chex
+optax

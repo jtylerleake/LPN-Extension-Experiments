@@ -1,0 +1,12 @@
+# Keep the image's build context to the code (the repo is bind-mounted at run time anyway).
+.git
+.colab
+.claude
+outputs
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+*.egg-info
+*.pt
+*.tmp

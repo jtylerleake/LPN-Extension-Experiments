@@ -9,14 +9,21 @@ description = "Latent Program Networks with an interpretable program-readout hea
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["src*"]
 
 [tool.setuptools.package-data]
-lpn_interp = ["configs/*.yaml"]
+src = ["configs/*.yaml"]
 
 [tool.ruff]
 line-length = 110
 
+[tool.ruff.lint]
+# Pinned explicitly so every ruff version (Docker's locked one, a local one)
+# checks the same rules: ruff's classic defaults (pycodestyle errors, pyflakes)
+# plus bugbear. EXE is left out on purpose -- the Windows bind mount makes
+# every file look executable inside the container.
+select = ["E4", "E7", "E9", "F", "B"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["."]

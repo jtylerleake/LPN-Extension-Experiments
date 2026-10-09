@@ -1,0 +1,27 @@
+# Local dev/test environment (Docker, CPU). Hand-edited; lock it with
+# docker/compile_requirements.ps1 into requirements.txt.
+#
+# Must include everything in colab/requirements.txt (the GPU runtime), so
+# code is tested locally against the same libraries it runs with on Colab --
+# tests/test_requirements.py enforces this. Versions differ: Colab uses its
+# own preinstalled builds, this image uses the locked versions.
+
+# CPU-only torch: its +cpu wheels come from this index, which keeps the lock
+# (and the image) free of the ~2 GB of nvidia-* CUDA wheels Linux torch pulls from PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- runtime libraries (mirror colab/requirements.txt) ---
+torch           # resolves to the +cpu build via the index above
+msgpack         # decoding the pretrained LPN's Flax checkpoint (no JAX needed)
+numpy
+pandas
+matplotlib
+seaborn
+pydantic>=2
+pyyaml
+pytest          # also on Colab, to run the suite on the VM
+packaging       # colab/vm_setup.py (tested here)
+
+# --- dev-only tooling ---
+ruff
+pip-tools

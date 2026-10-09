@@ -257,7 +257,7 @@ non-PyTorch model:
 
 ## 7. Colab CLI (`colab`, from WSL) instead of browser notebooks
 
-GPU runs go through `scripts/colab_runtime.py`, a WSL-side wrapper around
+GPU runs go through `colab/colab_runtime.py`, a WSL-side wrapper around
 the Colab CLI (Linux/macOS only, so it runs in WSL against `/mnt/c/...`).
 Things that shaped it:
 
@@ -280,7 +280,18 @@ Things that shaped it:
   with a manifest (commit, dirty flag, hash) that each run logs. Refuse to
   replace code under a running job: lazy imports would read the new files.
 - **`colab drivemount`, `auth`, `repl`, and `console` need a human at a
-  TTY.** An agent can't mount Drive, so the default output root is VM-local
-  (`/content/outputs`, then `fetch`), and Drive is opt-in (`--drive`) after
-  the user mounts it.
+  TTY.** An agent can't mount Drive, so the user mounts it themselves
+  (`up --drive` / `mount` call `colab drivemount` interactively). The session
+  then remembers that its output root is Drive.
+- **Resumability is a requirement: VMs get reclaimed on long runs.** Three
+  layers are needed:
+  - run state on Drive, in atomic checkpoints with optimizer, schedule, scaler,
+    RNG, and step;
+  - scripts where rerunning the same command resumes, skips if already done,
+    or refuses on a config-fingerprint mismatch;
+  - a local job registry (`.colab/state.json`) so `resume` can relaunch
+    unfinished jobs on a fresh VM.
+
+  Test resume by crashing mid-run in a unit test and asserting the final
+  weights are bit-identical to an uninterrupted run.
 - **Creating a VM spends compute units.** Ask before `up`, and always `down`.

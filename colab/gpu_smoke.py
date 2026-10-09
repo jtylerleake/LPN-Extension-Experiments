@@ -5,22 +5,23 @@ GPU, AMP training step on the full-size model, test-time latent gradients,
 greedy decoding), reports steps/sec so training budgets can be sized, and
 writes a small JSON result to the output root to exercise `fetch`.
 
-    python3 scripts/colab_runtime.py run -- scripts/gpu_smoke.py
+    python3 colab/colab_runtime.py run -- colab/gpu_smoke.py
 """
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import time
 from pathlib import Path
 
 import torch
 
-from lpn_interp.config import LossConfig, ModelConfig
-from lpn_interp.data.pattern2d import make_eval_tasks, sample_tasks, split_tile_ids, step_generator
-from lpn_interp.models.lpn import LPN
-from lpn_interp.training.losses import context_loss, training_losses
-from lpn_interp.utils.runtime import amp_dtype, describe_runtime, output_root, pick_device
+from src.config import LossConfig, ModelConfig
+from src.data.pattern2d import make_eval_tasks, sample_tasks, split_tile_ids, step_generator
+from src.models.lpn import LPN
+from src.training.losses import context_loss, training_losses
+from src.utils.runtime import amp_dtype, describe_runtime, output_root, pick_device
 
 
 def timed(fn, sync, repeats: int) -> float:
@@ -54,9 +55,10 @@ def main(argv: list[str] | None = None) -> dict:
     pool = split_tile_ids(0.1, seed=0)[0].to(device)
     losses = []
 
-    def train_step(step=[0]):
-        batch = sample_tasks(pool, args.batch_size, 4, step_generator(0, step[0], device))
-        step[0] += 1
+    steps = itertools.count()
+
+    def train_step():
+        batch = sample_tasks(pool, args.batch_size, 4, step_generator(0, next(steps), device))
         with torch.autocast(device.type, dtype=dtype or torch.float32, enabled=dtype is not None):
             terms = training_losses(model, batch.inputs, batch.outputs, LossConfig())
         opt.zero_grad(set_to_none=True)

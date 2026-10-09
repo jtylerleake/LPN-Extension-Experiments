@@ -3,11 +3,11 @@ import math
 import torch
 import torch.nn.functional as F
 
-from lpn_interp.config import LossConfig, ModelConfig
-from lpn_interp.data.pattern2d import NUM_TILES, sample_tasks
-from lpn_interp.execution.executor import find_anchor
-from lpn_interp.models.lpn import LPN
-from lpn_interp.training.losses import (
+from src.config import LossConfig, ModelConfig
+from src.data.pattern2d import NUM_TILES, sample_tasks
+from src.execution.executor import find_anchor
+from src.models.lpn import LPN
+from src.training.losses import (
     clip_per_row,
     commit_entropy,
     context_loss,
@@ -16,7 +16,7 @@ from lpn_interp.training.losses import (
     training_losses,
 )
 
-SMALL = ModelConfig(d_model=32, num_layers=1, num_heads=2, mlp_dim=64, head_hidden=16)
+SMALL = ModelConfig(num_layers=1, num_heads=2, head_dim=8, head_hidden=16)
 
 
 def _batch(n=8):
@@ -24,12 +24,12 @@ def _batch(n=8):
 
 
 def test_exec_nll_equals_tile_cell_cross_entropy():
-    """Executing then scoring the grid == CE on just the 4 tile cells."""
+    """Executing then scoring the grid (mean over 16 cells) == CE on the 4 tile cells / 16."""
     b = _batch()
     logits = torch.randn(8, 4, 4, 10)
     cells = find_anchor(b.inputs)[..., None] + torch.tensor([0, 1, 4, 5])
     targets = b.outputs.flatten(-2).gather(-1, cells)
-    expected = F.cross_entropy(logits.flatten(0, -2), targets.flatten(), reduction="none").view(8, 4, 4).sum(-1)
+    expected = F.cross_entropy(logits.flatten(0, -2), targets.flatten(), reduction="none").view(8, 4, 4).sum(-1) / 16
     assert torch.allclose(exec_nll(logits, b.inputs, b.outputs), expected, atol=1e-4)
 
 
@@ -40,7 +40,7 @@ def test_exec_nll_zero_for_confident_true_tile():
 
 
 def test_commit_entropy_bounds():
-    assert torch.allclose(commit_entropy(torch.zeros(4, 10)), torch.tensor(4 * math.log(10)))
+    assert torch.allclose(commit_entropy(torch.zeros(4, 10)), torch.tensor(math.log(10)))
     assert commit_entropy(100 * F.one_hot(torch.arange(4), 10).float()) < 1e-6
 
 
@@ -95,4 +95,34 @@ def test_training_latent_steps_run_and_backprop():
 def test_context_loss_shape():
     torch.manual_seed(0)
     model, b = LPN(SMALL), _batch()
+    assert context_loss(model, b.inputs, b.outputs, torch.randn(8, 2), 1.0, 0.1).shape == (8,)
+
+
+ARCH2 = SMALL.model_copy(update={"architecture": 2})
+
+
+def test_exec_nll_with_true_anchor_and_tile_is_zero():
+    b = _batch()
+    logits = 50 * F.one_hot(b.tiles, 10).float()[:, None].expand(-1, 4, -1, -1)
+    anchor_logits = 50 * F.one_hot(find_anchor(b.inputs), 16).float()
+    assert exec_nll(logits, b.inputs, b.outputs, anchor_logits).abs().max() < 1e-4
+
+
+def test_arch2_probe_trains_both_heads_only():
+    torch.manual_seed(0)
+    model, b = LPN(ARCH2), _batch()
+    terms = training_losses(model, b.inputs, b.outputs, LossConfig(), mode="probe")
+    terms.total.backward()
+    assert all(p.grad is None for p in model.encoder.parameters())
+    assert all(p.grad is None for p in model.decoder.parameters())
+    for name in ("head", "anchor_head"):
+        assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in getattr(model, name).parameters()), name
+
+
+def test_arch2_joint_losses_latent_steps_and_context_loss_run():
+    torch.manual_seed(0)
+    model, b = LPN(ARCH2), _batch()
+    terms = training_losses(model, b.inputs, b.outputs, LossConfig(), latent_steps=1, latent_lr=0.1)
+    terms.total.backward()
+    assert any(p.grad is not None for p in model.anchor_head.parameters())
     assert context_loss(model, b.inputs, b.outputs, torch.randn(8, 2), 1.0, 0.1).shape == (8,)

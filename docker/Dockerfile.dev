@@ -16,15 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-COPY docker/requirements/base.txt /tmp/base.txt
-RUN pip install --upgrade pip pip-tools && \
-    # CPU-only torch build: this image never trains real models (GPU training
-    # happens on Colab, see docs/colab_workflow.md), so the default CUDA
-    # build's ~2GB of bundled nvidia-* wheels would just be wasted download
-    # and disk. Installed first so base.txt's unpinned "torch" entry below is
-    # satisfied by this build instead of triggering a second, CUDA install.
-    pip install --index-url https://download.pytorch.org/whl/cpu torch && \
-    pip install -r /tmp/base.txt
+COPY docker/requirements.txt /tmp/requirements.txt
+# The lock pins torch's +cpu build (requirements.in points pip at PyTorch's CPU
+# index): this image never trains real models -- GPU runs happen on Colab, see
+# colab/README.md -- so CUDA wheels would only waste download and disk.
+RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
 
 # Source is bind-mounted by docker-compose for live editing; this COPY is a
 # fallback so the image is still usable standalone (e.g. in CI).

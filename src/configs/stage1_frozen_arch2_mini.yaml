@@ -1,0 +1,20 @@
+# Smoke-test mirror of stage1_frozen_arch2.yaml: same structure, capped numbers.
+name: stage1_frozen_arch2_mini
+model:
+  architecture: 2
+train:
+  mode: probe
+  init: pretrained
+  steps: 200
+  batch_size: 32
+  lr: 0.001
+  warmup_steps: 20
+  log_every: 20
+  eval_every: 100
+  checkpoint_every: 100
+latent_opt:
+  steps: 10
+eval:
+  num_tasks: 64
+  batch_size: 64
+  trajectory_tasks: 4

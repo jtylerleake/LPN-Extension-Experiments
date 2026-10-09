@@ -1,0 +1,19 @@
+# What a Colab VM must have to run this repo. `colab_runtime.py setup` (part of
+# `up`) reads this file on every new VM:
+# - a package that's present and satisfies its specifier is left alone (no
+#   upgrades or downgrades of Colab's own builds);
+# - a missing one is pip-installed;
+# - one marked `preinstalled` is only checked, never installed: replacing
+#   Colab's CUDA-matched build would break the GPU stack.
+# Everything here must also be in docker/requirements.in (tests/test_requirements.py).
+
+torch           # preinstalled (Colab's CUDA build)
+msgpack         # decoding the pretrained LPN's Flax checkpoint (no JAX needed)
+numpy
+pandas
+matplotlib
+seaborn
+pydantic>=2
+pyyaml
+pytest          # to run the test suite on the VM
+packaging       # preinstalled (colab/vm_setup.py itself uses it)

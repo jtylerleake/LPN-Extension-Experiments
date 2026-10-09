@@ -4,9 +4,9 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from lpn_interp.config import RunConfig
+from src.config import ModelConfig, RunConfig
 
-CONFIG_DIR = Path(__file__).resolve().parents[1] / "src" / "lpn_interp" / "configs"
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "src" / "configs"
 FULL_CONFIGS = sorted(p for p in CONFIG_DIR.glob("*.yaml") if not p.stem.endswith("_mini"))
 
 
@@ -23,23 +23,29 @@ def test_mini_mirrors_full(full):
     assert mini.loss == big.loss
     assert mini.model == big.model
     assert mini.data == big.data
-    assert mini.train.mode == big.train.mode
+    assert (mini.train.mode, mini.train.init, mini.train.lr) == (big.train.mode, big.train.init, big.train.lr)
     assert (mini.test_lambda_exec, mini.test_lambda_commit) == (big.test_lambda_exec, big.test_lambda_commit)
     assert mini.train.steps < big.train.steps
 
 
-def test_vanilla_matches_arch1_except_aux_losses():
-    arch1 = RunConfig.from_yaml(CONFIG_DIR / "arch1.yaml")
-    vanilla = RunConfig.from_yaml(CONFIG_DIR / "vanilla.yaml")
-    assert (vanilla.loss.lambda_exec, vanilla.loss.lambda_commit) == (0.0, 0.0)
-    assert vanilla.loss.beta == arch1.loss.beta
-    assert vanilla.model == arch1.model
-    assert vanilla.train == arch1.train
+def test_stage_configs_differ_only_where_intended():
+    s1, s2, s3 = (RunConfig.from_yaml(CONFIG_DIR / f"{n}.yaml") for n in ("stage1_frozen", "stage2_finetune", "stage3_scratch"))
+    assert (s1.train.mode, s1.train.init) == ("probe", "pretrained")
+    assert (s2.train.mode, s2.train.init) == ("joint", "pretrained")
+    assert (s3.train.mode, s3.train.init) == ("joint", "scratch")
+    assert s1.model == s2.model == s3.model == ModelConfig()
+    assert s1.loss == s2.loss == s3.loss
 
 
-def test_probe_requires_checkpoint():
+def test_probe_requires_a_trained_backbone():
     with pytest.raises(ValidationError):
-        RunConfig.model_validate({"name": "x", "train": {"mode": "probe"}})
+        RunConfig.model_validate({"name": "x", "train": {"mode": "probe", "init": "scratch"}})
+
+
+def test_pretrained_init_requires_checkpoint_architecture():
+    with pytest.raises(ValidationError, match="backbone"):
+        RunConfig.model_validate({"name": "x", "model": {"num_layers": 3}, "train": {"init": "pretrained"}})
+    RunConfig.model_validate({"name": "x", "model": {"head_hidden": 64}, "train": {"init": "pretrained"}})
 
 
 def test_unknown_keys_rejected():

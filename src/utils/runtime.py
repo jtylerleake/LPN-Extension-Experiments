@@ -12,8 +12,8 @@ from pathlib import Path
 
 import torch
 
-# Written by scripts/colab_runtime.py's `sync` next to the uploaded code.
-BUNDLE_MANIFEST = Path(__file__).resolve().parents[3] / "BUNDLE.json"
+# Written by colab/colab_runtime.py's `sync` next to the uploaded code.
+BUNDLE_MANIFEST = Path(__file__).resolve().parents[2] / "BUNDLE.json"
 
 
 def output_root() -> Path:

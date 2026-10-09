@@ -1,17 +1,15 @@
-# Smoke-test mirror of vanilla.yaml: same structure, capped numbers.
-name: vanilla_mini
-loss:
-  lambda_exec: 0.0
-  lambda_commit: 0.0
-  beta: 0.0001
+# Smoke-test mirror of stage2_finetune.yaml: same structure, capped numbers.
+name: stage2_finetune_mini
 train:
   mode: joint
+  init: pretrained
   steps: 200
   batch_size: 32
+  lr: 3.0e-05
+  warmup_steps: 20
   log_every: 20
   eval_every: 100
   checkpoint_every: 100
-  warmup_steps: 20
 latent_opt:
   steps: 10
 eval:

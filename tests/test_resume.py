@@ -1,4 +1,4 @@
-from lpn_interp.utils.resume import append_jsonl_row, completed_fingerprints, fingerprint, read_jsonl_rows
+from src.utils.resume import append_jsonl_row, completed_fingerprints, fingerprint, read_jsonl_rows
 
 
 def test_fingerprint_is_order_independent():

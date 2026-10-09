@@ -7,7 +7,7 @@ services:
       - ..:/workspace
     working_dir: /workspace
     environment:
-      - PYTHONPATH=/workspace/src
+      - PYTHONPATH=/workspace
     stdin_open: true
     tty: true
     command: bash

@@ -1,6 +1,6 @@
 import torch
 
-from lpn_interp.data.pattern2d import (
+from src.data.pattern2d import (
     NUM_TILES,
     all_tiles,
     anchor_positions,

@@ -14,12 +14,12 @@ Coding conventions: `CLAUDE-CODING-SKILL-10012026.md`.
 | Tile colors | 1–9 only (no black), giving 9^4 = 6,561 programs |
 | Latent dim | d = 2 everywhere |
 | Head training | Jointly through L_exec only (no ground-truth tile labels) |
-| Infra | Docker (CPU tests) + Colab GPUs via the **Colab CLI from WSL** (`scripts/colab_runtime.py`). No notebooks |
+| Infra | Docker (CPU tests) + Colab GPUs via the **Colab CLI from WSL** (`colab/colab_runtime.py`). No notebooks |
 
 ## 1. Target layout
 
 ```
-src/lpn_interp/
+src/
   data/pattern2d.py        task sampler (tile, distinct anchors), torch tensors, seeded
   models/encoder.py        per-pair transformer -> (mu_i, logvar_i); pooling + LOO helpers
   models/decoder.py        causal transformer p(y | x, z); teacher-forced loss + greedy decode
@@ -34,7 +34,8 @@ src/lpn_interp/
   configs/arch1.yaml, arch1_mini.yaml, vanilla.yaml, vanilla_mini.yaml
   utils/  seeding.py, logging_utils.py, colab.py, resume.py   (trimmed from the existing code)
 scripts/  train.py, evaluate.py, plot_results.py
-scripts/  colab_runtime.py (WSL driver for the Colab CLI), gpu_smoke.py
+colab/    colab_runtime.py (WSL driver), vm_setup.py, requirements.txt, gpu_smoke.py, check_port_parity.py
+docker/   CPU dev image, requirements.in/.txt, compile_requirements.ps1
 tests/    test_data.py, test_executor.py, test_model.py, test_losses.py, test_latent_opt.py, test_config.py
 ```
 
@@ -101,11 +102,11 @@ Each result row goes to `metrics.jsonl` on Drive with a fingerprint, so a resume
 - the core of `resume.py`
 - `compile_requirements.ps1`
 - the Docker files
-- (all notebooks removed: GPU runs go through the Colab CLI, see `docs/colab_workflow.md`)
+- (all notebooks removed: GPU runs go through the Colab CLI, see `colab/README.md`)
 
 **Dependencies:** remove transformers, peft, accelerate, bitsandbytes, datasets, and safetensors from `base.in`, then regenerate `base.txt` and `colab.txt`.
 
-**Docs:** rename the project in `pyproject.toml` and rewrite `README.md` and `docs/colab_workflow.md` (drop the HF-token step).
+**Docs:** rename the project in `pyproject.toml` and rewrite `README.md` and the Colab workflow doc (drop the HF-token step).
 
 ## 6. Phases
 
@@ -127,3 +128,51 @@ Phases 1–5 are verified in the Docker CPU image. If Docker isn't running, I'll
 2. **Post-hoc probe:** yes. `probe` mode trains a fresh head on the *frozen* vanilla LPN's z (detached) with L_exec + L_commit.
 3. **Test-time optimizer:** plain SGD with gradient clipping (norm 1.0) and best-step selection. K = 100, lr tuned on a separate seed.
 4. **Model size / budget:** 2 layers, dim 128, batch 256, 100k–200k steps.
+
+## 8. Pivot: pretrained backbone (2026-10-06)
+
+The authors' Pattern-2D checkpoint (`clement-bonnet/lpn-2d`, `quiet-thunder-789--checkpoint:v0`)
+was trained on lpn's `PatternTaskGenerator`. That generator is exactly our task: 4x4 grids,
+a blue anchor at rows/cols {0,1,2}, and tile colors 1-9. Its anchors may repeat within a
+task, so our distinct-anchor tasks are a subset of its training distribution. Its latent
+is 2-dimensional.
+
+Decisions:
+- **Port, not JAX.** The paper's architecture is ported to PyTorch (`src/models/`) and
+  *replaces* our custom encoder/decoder everywhere. Weights are converted from
+  `state.msgpack` with plain msgpack (`src/models/pretrained.py`). The download is pinned
+  to an HF revision and checked against its sha256.
+- **The paper's semantics are adopted:**
+  - one latent is sampled per pair, and the leave-one-out context is the mean of the
+    other pairs' samples;
+  - the per-pair loss is the shape CE plus the mean cell CE;
+  - beta defaults to 1e-3 (the checkpoint's KL coefficient);
+  - L_exec and L_commit are per-cell means;
+  - test-time search sums over pairs, so the paper's lr 0.1 applies.
+- **Deviations, exact for 4x4 grids:** no padding masks; output-shape tokens are
+  teacher-forced to 4x4, and shape accuracy is reported as a diagnostic.
+- **Stages:**
+  1. frozen + head (`mode: probe, init: pretrained`);
+  2. all-weights fine-tune at lr 3e-5 for 10k steps (`joint, pretrained`);
+  3. retrain from scratch (`joint, scratch`).
+
+  We advance between stages by reviewing results, with no fixed threshold.
+- **Verification:**
+  - local tests check the conversion round trip, the mask structure, and no target
+    leakage;
+  - the real checkpoint reaches >90% query pixel accuracy at z0 with no search (≈98%;
+    75% of query grids fully correct);
+  - `colab/check_port_parity.py` compares against the original JAX code on Colab
+    (lpn commit 0adfe56).
+
+## 9. Runtime isolation (2026-10-07)
+
+- **Docker (`docker/`)** is the local dev/test runtime: its own requirements, a lock
+  script, and a README.
+- **Colab/WSL (`colab/`)** is the real runtime: the driver, `requirements.txt`
+  (consumed by `colab/vm_setup.py` on the VM), the parity-check extras, and the
+  Colab-only scripts.
+- **The contract between them:** every Colab requirement is also a Docker requirement
+  (`tests/test_requirements.py`).
+- **Shared code** (`src/`, `scripts/train.py`, `tests/`) is runtime-agnostic.
+- `tqdm` was dropped as unused.

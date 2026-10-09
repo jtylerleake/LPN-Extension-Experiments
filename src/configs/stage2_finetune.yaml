@@ -1,0 +1,9 @@
+# Stage 2: light fine-tune of every weight from the pretrained LPN, joint loss.
+name: stage2_finetune
+train:
+  mode: joint
+  init: pretrained
+  steps: 10000
+  batch_size: 256
+  lr: 3.0e-5
+  warmup_steps: 500
