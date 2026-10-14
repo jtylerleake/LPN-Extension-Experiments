@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, PositiveInt, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, model_validator
 
 # Fixed by the testbed (prompts/PROJECT-SPEC-1.md section 3); not configurable.
 GRID_SIZE = 4
@@ -71,6 +71,7 @@ class ModelConfig(_Strict):
     head_depth: PositiveInt = 2  # number of hidden layers
     head_activation: Literal["relu", "silu"] = "relu"
     head_residual: bool = False  # pre-norm residual blocks (for deep heads)
+    head_dropout: float = Field(0.0, ge=0.0, lt=1.0)  # after each hidden activation
     architecture: Literal[1, 2] = 1
 
     @property

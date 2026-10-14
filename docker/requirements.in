@@ -19,6 +19,7 @@ matplotlib
 seaborn
 pydantic>=2
 pyyaml
+tqdm            # sweep progress bars
 pytest          # also on Colab, to run the suite on the VM
 packaging       # colab/vm_setup.py (tested here)
 

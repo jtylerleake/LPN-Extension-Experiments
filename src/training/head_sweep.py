@@ -10,10 +10,16 @@ lambda_exec * L_exec (+ lambda_commit * L_commit, off by default).
 Tile splits: training tiles as in every run (split_tile_ids(0.1, 0)). The 656 held-out tiles are
 split in half: validation ranks configurations, test is scored only in round C.
 
+Every run: ReLU, 25k steps, validation every 2.5k. Configurations are ranked by validation
+tile_cell_acc (cells right out of 4, averaged), then tile_full_acc.
+
 Rounds (each skips runs already in results.jsonl, so rerunning a round resumes it):
-  A  head size: depth x width (ReLU, lr 1e-3, 50k steps); depth >= 4 uses residual blocks.
-  B  training: lr x steps x activation, for the 3 best round-A heads.
-  C  the 3 best configurations of A + B, 3 seeds each, scored on validation and test.
+  A   head size x lr: depth x width x lr, weight decay 1e-3, no dropout, residual blocks
+      for depth >= 4.
+  B   regularization, one setting at a time, for the 3 best round-A configurations (a "base"):
+      weight decay, dropout, residual flipped; the other settings stay at the base's.
+  B2  per base, the best value of each round-B setting combined into one run.
+  C   the 3 best configurations of A + B + B2, 3 seeds each, scored on validation and test.
 """
 from __future__ import annotations
 
@@ -22,6 +28,8 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from src.config import GRID_SIZE, LossConfig, ModelConfig
 from src.data.pattern2d import NUM_ANCHORS, all_tiles, anchor_positions, render, split_tile_ids
@@ -34,16 +42,18 @@ from src.utils.resume import append_jsonl_row, completed_fingerprints, fingerpri
 
 log = get_logger(__name__)
 
-SWEEP_VERSION = 1  # bump when a code change alters what a given spec trains
+SWEEP_VERSION = 2  # bump when a code change alters what a given spec trains
 NUM_PAIRS, BATCH_SIZE, WARMUP_STEPS, GRAD_CLIP = 4, 256, 500, 1.0
-EVAL_EVERY = 10_000
+EVAL_EVERY = 2_500
 SEEN_EVAL_TASKS, HELDOUT_TASKS_PER_TILE, EVAL_SEED = 2048, 8, 1234
 VAL_TEST_SEED = 0
 
-DEPTHS, WIDTHS, RESIDUAL_FROM_DEPTH = (2, 3, 4, 6), (128, 256, 512, 1024), 4
-LRS, STEPS, ACTIVATIONS, SEEDS, TOP_K = (3e-4, 1e-3, 3e-3), (50_000, 150_000), ("relu", "silu"), (0, 1, 2), 3
-ROUND_A_TRAINING = {"activation": "relu", "lr": 1e-3, "steps": 50_000, "seed": 0}
-HEAD_KEYS = ("depth", "width", "residual")
+DEPTHS, WIDTHS, LRS, RESIDUAL_FROM_DEPTH = (2, 3, 4, 6), (128, 256, 512, 1024), (1e-3, 3e-3, 1e-2), 4
+STEPS, BASE_WEIGHT_DECAY, BASE_DROPOUT = 25_000, 1e-3, 0.0
+WEIGHT_DECAYS, DROPOUTS = (0.0, 1e-4, 1e-3, 1e-2), (0.0, 0.1, 0.3)
+REG_KEYS = ("weight_decay", "dropout", "residual")  # round B's settings
+BASE_KEYS = ("depth", "width", "lr")  # what identifies a round-B base
+SEEDS, TOP_K = (0, 1, 2), 3
 STAGE1_LOSS = LossConfig()  # stage 1's loss weights (lambda_exec 1.0, lambda_commit 0)
 
 
@@ -112,8 +122,8 @@ class Splits:
 
 
 def head_config(spec: dict) -> ModelConfig:
-    return ModelConfig(head_hidden=spec["width"], head_depth=spec["depth"],
-                       head_activation=spec["activation"], head_residual=spec["residual"])
+    return ModelConfig(head_hidden=spec["width"], head_depth=spec["depth"], head_activation=spec["activation"],
+                       head_residual=spec["residual"], head_dropout=spec["dropout"])
 
 
 @torch.no_grad()
@@ -130,11 +140,13 @@ def run(spec: dict, cache: EncodingCache, splits: Splits, loss_cfg: LossConfig, 
     dev, steps = cache.device, spec["steps"]
     torch.manual_seed(spec["seed"])
     head = MLPHead(head_config(spec)).to(dev)
-    opt = torch.optim.AdamW(head.parameters(), lr=spec["lr"], weight_decay=0.0)
+    opt = torch.optim.AdamW(head.parameters(), lr=spec["lr"], weight_decay=spec["weight_decay"])
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_factor(s, WARMUP_STEPS, steps))
     gen = torch.Generator(device=dev).manual_seed(spec["seed"])
     curve, start = [], time.perf_counter()
-    for step in range(1, steps + 1):
+    bar = tqdm(range(1, steps + 1), desc=f"d{spec['depth']} w{spec['width']} lr{spec['lr']:g}", unit="step",
+               leave=False, position=1, mininterval=2.0, dynamic_ncols=True)
+    for step in bar:
         tile, pairs = cache.tasks(splits.train, BATCH_SIZE, gen)
         mu, logvar = cache.mu[pairs], cache.logvar[pairs]
         z = loo_mean(mu + (0.5 * logvar).exp() * torch.randn(mu.shape, generator=gen, device=dev))
@@ -153,8 +165,9 @@ def run(spec: dict, cache: EncodingCache, splits: Splits, loss_cfg: LossConfig, 
             val = evaluate(head, cache, splits.eval["val"])
             head.train()
             curve.append({"step": step, "loss": round(loss.item(), 5), **{f"val/{k}": round(v, 5) for k, v in val.items()}})
-            log.info(f"  step {step}/{steps}: loss={loss.item():.4f} val_full={val['tile_full_acc']:.4f} "
-                     f"val_cell={val['tile_cell_acc']:.4f}")
+            bar.set_postfix(loss=f"{loss.item():.4f}", val_cell=f"{val['tile_cell_acc']:.3f}",
+                            val_full=f"{val['tile_full_acc']:.3f}")
+    bar.close()
     seconds = time.perf_counter() - start
     head.eval()
     final = {}
@@ -170,13 +183,39 @@ def spec_fingerprint(spec: dict, with_test: bool, loss_cfg: LossConfig) -> str:
                         "batch": BATCH_SIZE, "warmup": WARMUP_STEPS, "pairs": NUM_PAIRS})
 
 
-def make_spec(depth: int, width: int, activation: str, lr: float, steps: int, seed: int) -> dict:
-    return {"depth": depth, "width": width, "residual": depth >= RESIDUAL_FROM_DEPTH,
-            "activation": activation, "lr": lr, "steps": steps, "seed": seed}
+def make_spec(depth: int, width: int, lr: float, seed: int = 0, weight_decay: float = BASE_WEIGHT_DECAY,
+              dropout: float = BASE_DROPOUT, residual: bool | None = None) -> dict:
+    """Residual defaults to depth >= RESIDUAL_FROM_DEPTH."""
+    return {"depth": depth, "width": width, "residual": depth >= RESIDUAL_FROM_DEPTH if residual is None else residual,
+            "activation": "relu", "lr": lr, "steps": STEPS, "weight_decay": weight_decay, "dropout": dropout,
+            "seed": seed}
+
+
+def base_spec(spec: dict) -> dict:
+    """The round-A spec a run varies (its base): same depth/width/lr, base regularization."""
+    return make_spec(*(spec[k] for k in BASE_KEYS))
 
 
 def rank_key(row: dict) -> tuple[float, float]:
-    return row["final"]["val/tile_full_acc"], row["final"]["val/tile_cell_acc"]
+    """Validation cell accuracy first (partial credit), full-tile accuracy breaks ties."""
+    return row["final"]["val/tile_cell_acc"], row["final"]["val/tile_full_acc"]
+
+
+def variations(base: dict) -> list[dict]:
+    """Round B for one base: each REG_KEYS setting varied alone (the base itself included)."""
+    return ([{**base, "weight_decay": wd} for wd in WEIGHT_DECAYS] + [{**base, "dropout": p} for p in DROPOUTS]
+            + [{**base, "residual": r} for r in (False, True)])
+
+
+def best_combination(base: dict, rows: list[dict]) -> dict:
+    """Round B2: for each setting, the value whose one-at-a-time run (or the base) ranked best."""
+    spec = dict(base)
+    for key in REG_KEYS:
+        others = [k for k in REG_KEYS if k != key]
+        cands = [r for r in rows if all(r["spec"].get(k) == base[k] for k in (*BASE_KEYS, *others))]
+        if cands:
+            spec[key] = max(cands, key=rank_key)["spec"][key]
+    return spec
 
 
 def round_specs(name: str, rows: list[dict], loss_cfg: LossConfig,
@@ -190,25 +229,43 @@ def round_specs(name: str, rows: list[dict], loss_cfg: LossConfig,
     return list(unique.values()), with_test
 
 
+def _require(name: str, prior: str, rows: list[dict], loss_cfg: LossConfig, max_steps: int | None) -> list[dict]:
+    """The finished rows of round `prior`; raises if any of its runs is missing."""
+    specs = round_specs(prior, rows, loss_cfg, max_steps)[0]
+    fps = {spec_fingerprint(sp, False, loss_cfg) for sp in specs}
+    trained = [r for r in rows if not r["test"]]
+    missing = fps - completed_fingerprints(trained)
+    if missing:
+        raise RuntimeError(f"round {prior} isn't finished ({len(missing)} of {len(specs)} runs missing): "
+                           f"run it before round {name}")
+    return [r for r in trained if r["fingerprint"] in fps]
+
+
+def _bases(rows: list[dict], loss_cfg: LossConfig, max_steps: int | None) -> list[dict]:
+    """The TOP_K best round-A configurations (with base regularization)."""
+    a_rows = sorted(_require("B", "A", rows, loss_cfg, max_steps), key=rank_key, reverse=True)
+    return [base_spec(r["spec"]) for r in a_rows[:TOP_K]]
+
+
 def _round_specs(name, rows, loss_cfg, max_steps):
     if name == "A":
-        return [make_spec(d, w, **ROUND_A_TRAINING) for d in DEPTHS for w in WIDTHS], False
-    trained = [r for r in rows if not r["test"]]
+        return [make_spec(d, w, lr) for d in DEPTHS for w in WIDTHS for lr in LRS], False
     if name == "B":
-        a_specs = round_specs("A", rows, loss_cfg, max_steps)[0]
-        done = {spec_fingerprint(s, False, loss_cfg) for s in a_specs}
-        missing = done - completed_fingerprints(trained)
-        if missing:
-            raise RuntimeError(f"round A isn't finished ({len(missing)} of {len(a_specs)} runs missing): run it first")
-        a_rows = sorted((r for r in trained if r["fingerprint"] in done), key=rank_key, reverse=True)
-        heads = [{k: r["spec"][k] for k in HEAD_KEYS} for r in a_rows[:TOP_K]]
-        return [make_spec(h["depth"], h["width"], act, lr, steps, 0)
-                for h in heads for lr in LRS for steps in STEPS for act in ACTIVATIONS], False
+        return [v for b in _bases(rows, loss_cfg, max_steps) for v in variations(b)], False
+    if name == "B2":
+        b_rows = _require("B2", "B", rows, loss_cfg, max_steps)
+        return [best_combination(b, b_rows) for b in _bases(rows, loss_cfg, max_steps)], False
     if name == "C":
-        if not any(r["round"] == "B" for r in trained):
-            raise RuntimeError("round B hasn't run yet: run it first")
-        best = sorted(trained, key=rank_key, reverse=True)[:TOP_K]
-        return [{**r["spec"], "seed": seed} for r in best for seed in SEEDS], True
+        _require("C", "B2", rows, loss_cfg, max_steps)
+        best, seen = [], set()
+        for r in sorted((r for r in rows if not r["test"]), key=rank_key, reverse=True):
+            config = {**r["spec"], "seed": 0}
+            if spec_fingerprint(config, False, loss_cfg) not in seen:
+                seen.add(spec_fingerprint(config, False, loss_cfg))
+                best.append(r["spec"])
+            if len(best) == TOP_K:
+                break
+        return [{**sp, "seed": seed} for sp in best for seed in SEEDS], True
     raise ValueError(f"unknown round {name!r}")
 
 
@@ -224,24 +281,32 @@ def run_round(name: str, results: Path, cache_factory, loss_cfg: LossConfig = ST
     log.info(f"round {name}: {len(specs)} runs, {len(specs) - len(todo)} already done, {len(todo)} to go")
     if todo:
         cache, splits = cache_factory()
-        for i, spec in enumerate(todo, 1):
-            log.info(f"[{i}/{len(todo)}] {spec}")
-            row = run(spec, cache, splits, loss_cfg, with_test, eval_every)
-            row = {"fingerprint": spec_fingerprint(spec, with_test, loss_cfg), "round": name, **row}
-            append_jsonl_row(results, row)
-            log.info(f"  done in {row['seconds']}s: " + " ".join(f"{k}={v}" for k, v in row["final"].items()))
+        best = max((r["final"]["val/tile_cell_acc"] for r in rows if r["round"] == name), default=0.0)
+        # one bar over the round's runs (finished ones count from the start), one over the current run's steps
+        with logging_redirect_tqdm(loggers=[log]), tqdm(total=len(specs), initial=len(specs) - len(todo),
+                                                        desc=f"round {name}", unit="run", position=0,
+                                                        dynamic_ncols=True) as runs:
+            for spec in todo:
+                log.info(f"start {spec}")
+                row = run(spec, cache, splits, loss_cfg, with_test, eval_every)
+                row = {"fingerprint": spec_fingerprint(spec, with_test, loss_cfg), "round": name, **row}
+                append_jsonl_row(results, row)
+                log.info(f"  done in {row['seconds']}s: " + " ".join(f"{k}={v}" for k, v in row["final"].items()))
+                best = max(best, row["final"]["val/tile_cell_acc"])
+                runs.set_postfix(best_val_cell=f"{best:.3f}", last_run=f"{row['seconds']:.0f}s")
+                runs.update()
     rows = read_jsonl_rows(results)
     fps = {spec_fingerprint(s, with_test, loss_cfg) for s in specs}
     return [r for r in rows if r["fingerprint"] in fps]
 
 
 def summary_table(rows: list[dict]) -> str:
-    """Rows ranked by validation full-tile accuracy, one line each."""
-    cols = ("depth", "width", "residual", "activation", "lr", "steps", "seed")
-    metrics = ("seen/tile_full_acc", "val/tile_full_acc", "val/tile_cell_acc", "test/tile_full_acc", "test/tile_cell_acc")
+    """Rows ranked by validation cell accuracy (rank_key), one line each."""
+    cols = ("depth", "width", "residual", "lr", "weight_decay", "dropout", "seed")
+    metrics = ("seen/tile_cell_acc", "val/tile_cell_acc", "val/tile_full_acc", "test/tile_cell_acc", "test/tile_full_acc")
     lines = ["round " + " ".join(f"{c:>10}" for c in cols) + " " + " ".join(f"{m:>19}" for m in metrics)]
     for r in sorted(rows, key=rank_key, reverse=True):
-        vals = " ".join(f"{str(r['spec'][c]):>10}" for c in cols)
+        vals = " ".join(f"{str(r['spec'].get(c)):>10}" for c in cols)
         ms = " ".join(f"{r['final'].get(m, float('nan')):>19.4f}" for m in metrics)
         lines.append(f"{r['round']:>5} {vals} {ms}")
     return "\n".join(lines)

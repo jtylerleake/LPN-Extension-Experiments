@@ -35,6 +35,29 @@ def test_configurable_heads_have_the_right_shape(depth, residual, act):
     assert linears - 1 + blocks == depth  # every hidden layer, not counting the output layer
 
 
+@pytest.mark.parametrize("residual", [False, True])
+def test_dropout_is_active_in_training_only(residual):
+    head = MLPHead(ModelConfig(head_hidden=64, head_depth=3, head_residual=residual, head_dropout=0.5))
+    z = torch.randn(8, 2)
+    assert not torch.equal(head(z), head(z))
+    head.eval()
+    assert torch.equal(head(z), head(z))
+
+
+def test_rank_key_prefers_cell_accuracy():
+    rows = [{"final": {"val/tile_cell_acc": c, "val/tile_full_acc": f}} for c, f in [(0.7, 0.2), (0.8, 0.1)]]
+    assert max(rows, key=hs.rank_key)["final"]["val/tile_cell_acc"] == 0.8
+
+
+def test_best_combination_takes_each_settings_best_value():
+    base = hs.make_spec(4, 256, 1e-3)
+    rows = [{"spec": sp, "final": {"val/tile_cell_acc": acc, "val/tile_full_acc": 0.0}}
+            for sp, acc in [(base, 0.5), ({**base, "weight_decay": 1e-2}, 0.6), ({**base, "dropout": 0.3}, 0.55),
+                            ({**base, "dropout": 0.1}, 0.4), ({**base, "residual": False}, 0.45)]]
+    best = hs.best_combination(base, rows)
+    assert (best["weight_decay"], best["dropout"], best["residual"]) == (1e-2, 0.3, True)
+
+
 def test_cache_matches_the_live_encoder(cache):
     torch.manual_seed(0)
     model = LPN(SMALL).eval()
@@ -73,14 +96,23 @@ def test_rounds_run_in_order_resume_and_only_c_sees_test(cache, tmp_path):
     with pytest.raises(RuntimeError, match="round A"):
         hs.run_round("B", results, factory, max_steps=2, eval_every=1)
     a = hs.run_round("A", results, factory, max_steps=2, eval_every=1)
-    assert len(a) == len(hs.DEPTHS) * len(hs.WIDTHS)
+    assert len(a) == len(hs.DEPTHS) * len(hs.WIDTHS) * len(hs.LRS)
     assert all("test/tile_full_acc" not in r["final"] for r in a)
+    assert all(r["spec"]["activation"] == "relu" and r["spec"]["weight_decay"] == hs.BASE_WEIGHT_DECAY for r in a)
     n_rows = len(read_jsonl_rows(results))
     hs.run_round("A", results, factory, max_steps=2)  # resume: nothing left to do
     assert len(read_jsonl_rows(results)) == n_rows and calls["n"] == 1
 
+    with pytest.raises(RuntimeError, match="round B"):
+        hs.run_round("B2", results, factory, max_steps=2, eval_every=1)
     b = hs.run_round("B", results, factory, max_steps=2, eval_every=1)
-    assert {(r["spec"]["depth"], r["spec"]["width"]) for r in b} <= {(r["spec"]["depth"], r["spec"]["width"]) for r in a}
+    best_a = sorted(a, key=hs.rank_key, reverse=True)[:hs.TOP_K]
+    assert {tuple(r["spec"][k] for k in hs.BASE_KEYS) for r in b} == {tuple(r["spec"][k] for k in hs.BASE_KEYS) for r in best_a}
+    per_base = len(hs.WEIGHT_DECAYS) + len(hs.DROPOUTS) - 1 + 1  # the base counted once, residual flipped
+    assert len(b) == hs.TOP_K * per_base
+    assert len(read_jsonl_rows(results)) == n_rows + hs.TOP_K * (per_base - 1)  # the bases are reused from A
+    b2 = hs.run_round("B2", results, factory, max_steps=2, eval_every=1)
+    assert len(b2) == hs.TOP_K
     c = hs.run_round("C", results, factory, max_steps=2, eval_every=1)
     assert len(c) == hs.TOP_K * len(hs.SEEDS)
     assert all("test/tile_full_acc" in r["final"] for r in c)

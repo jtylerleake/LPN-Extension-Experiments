@@ -1,9 +1,11 @@
 """Stage-1 head sweep on the frozen pretrained LPN (see src/training/head_sweep.py).
 
-    python scripts/sweep_head.py --round A        # head size (16 runs)
-    python scripts/sweep_head.py --round B        # lr / steps / activation for the 3 best heads (36 runs)
-    python scripts/sweep_head.py --round C        # 3 best configurations x 3 seeds, scored on test
+    python scripts/sweep_head.py --round A        # depth x width x lr (48 runs)
+    python scripts/sweep_head.py --round B        # weight decay / dropout / residual one at a time, 3 best of A
+    python scripts/sweep_head.py --round B2       # per base, the best round-B values combined (3 runs)
+    python scripts/sweep_head.py --round C        # 3 best configurations x 3 seeds, scored on test (9 runs)
     python scripts/sweep_head.py --round summary  # ranked table of everything so far
+    python scripts/sweep_head.py --round plots    # the standard figures, into <sweep dir>/plots
 
 Results go to <output root>/sweeps/<name>/results.jsonl, one row per finished run (output root =
 --output-root, else $LPN_OUTPUT_ROOT, which colab/colab_runtime.py sets on the VM, else ./outputs).
@@ -24,10 +26,10 @@ from src.utils.runtime import describe_runtime, output_root, pick_device
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--round", required=True, choices=["A", "B", "C", "summary"])
+    parser.add_argument("--round", required=True, choices=["A", "B", "B2", "C", "summary", "plots"])
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-root", default=None)
-    parser.add_argument("--name", default="head_sweep")
+    parser.add_argument("--name", default="head_sweep_v2")
     parser.add_argument("--max-steps", type=int, default=None, help="cap every run's steps (smoke test)")
     args = parser.parse_args(argv)
 
@@ -35,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     results = (Path(args.output_root) if args.output_root else output_root()) / "sweeps" / name / "results.jsonl"
     if args.round == "summary":
         print(summary_table(read_jsonl_rows(results)))
+        return 0
+    if args.round == "plots":
+        from src.viz.sweep_plots import standard_plots
+
+        for path in standard_plots(read_jsonl_rows(results), results.parent / "plots"):
+            print(path)
         return 0
 
     device = pick_device(args.device)

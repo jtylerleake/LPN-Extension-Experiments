@@ -26,23 +26,29 @@ ACTIVATIONS = {"relu": nn.ReLU, "silu": nn.SiLU}
 
 
 class ResidualBlock(nn.Module):
-    """x + act(Linear(LayerNorm(x))): keeps deep heads trainable."""
+    """x + dropout(act(Linear(LayerNorm(x)))): keeps deep heads trainable."""
 
-    def __init__(self, width: int, act: type[nn.Module]):
+    def __init__(self, width: int, act: type[nn.Module], dropout: float = 0.0):
         super().__init__()
         self.norm, self.linear, self.act = nn.LayerNorm(width), nn.Linear(width, width), act()
+        self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.act(self.linear(self.norm(x)))
+        return x + self.drop(self.act(self.linear(self.norm(x))))
 
 
 def _mlp(cfg: ModelConfig, out_dim: int) -> nn.Sequential:
     """`head_depth` hidden layers of width `head_hidden`. The defaults (2 plain ReLU layers)
-    give the original head, parameter names included, so old checkpoints still load."""
-    width, act = cfg.head_hidden, ACTIVATIONS[cfg.head_activation]
-    layers: list[nn.Module] = [nn.Linear(cfg.latent_dim, width), act()]
+    give the original head, parameter names included, so old checkpoints still load (dropout
+    modules are only inserted when head_dropout > 0, so they don't shift the indices)."""
+    width, act, p = cfg.head_hidden, ACTIVATIONS[cfg.head_activation], cfg.head_dropout
+
+    def hidden(linear: nn.Linear) -> list[nn.Module]:
+        return [linear, act()] + ([nn.Dropout(p)] if p else [])
+
+    layers = hidden(nn.Linear(cfg.latent_dim, width))
     for _ in range(cfg.head_depth - 1):
-        layers += [ResidualBlock(width, act)] if cfg.head_residual else [nn.Linear(width, width), act()]
+        layers += [ResidualBlock(width, act, p)] if cfg.head_residual else hidden(nn.Linear(width, width))
     if cfg.head_residual:
         layers.append(nn.LayerNorm(width))
     layers.append(nn.Linear(width, out_dim))

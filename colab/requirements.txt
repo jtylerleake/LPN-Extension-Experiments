@@ -15,5 +15,6 @@ matplotlib
 seaborn
 pydantic>=2
 pyyaml
+tqdm            # sweep progress bars (preinstalled on Colab)
 pytest          # to run the test suite on the VM
 packaging       # preinstalled (colab/vm_setup.py itself uses it)

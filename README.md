@@ -31,9 +31,11 @@ anchor -- and is expected to fail; eval adds `anchor_acc` and `anchor_valid`.
 
 **Head sweep** (`scripts/sweep_head.py`, stage 1 only): which MLP head reads the tile out of the
 frozen z best. The encoder is frozen, so every (tile, anchor) pair is encoded once and runs train
-only the head. Round A sweeps depth x width, round B learning rate x steps x activation for the
-3 best heads, round C reruns the 3 best with 3 seeds. The held-out tiles are split into
-validation (ranks configurations) and test (scored only in round C).
+only the head (ReLU, 25k steps). Round A sweeps depth x width x lr; round B varies weight decay,
+dropout and residual blocks one at a time around the 3 best; round B2 combines each base's best
+values; round C reruns the 3 best with 3 seeds. The held-out tiles are split into validation
+(ranks configurations by tile_cell_acc) and test (scored only in round C).
+`--round plots` draws accuracy-vs-config curves (validation solid, training tiles dashed).
 
 ## Layout
 
@@ -51,7 +53,7 @@ src/                      the project code (runs anywhere)
   configs/                  stage1_frozen(_arch2), stage2_finetune, stage3_scratch (+ _mini smoke versions)
   utils/                    runtime (device/AMP/output root), resume, logging, seeding
 scripts/train.py          train one run; rerunning the same command resumes it
-scripts/sweep_head.py     stage-1 head sweep (rounds A/B/C + summary); rerunning a round resumes it
+scripts/sweep_head.py     stage-1 head sweep (rounds A/B/B2/C, summary, plots); rerunning a round resumes it
 tests/                    pytest suite (CPU; runs in Docker or on the VM)
 
 colab/                    GPU runtime: Colab VMs driven by the Colab CLI from WSL  -> colab/README.md
