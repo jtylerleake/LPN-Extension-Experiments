@@ -44,6 +44,16 @@ def test_commit_entropy_bounds():
     assert commit_entropy(100 * F.one_hot(torch.arange(4), 10).float()) < 1e-6
 
 
+def test_commit_off_by_default_but_reported():
+    torch.manual_seed(0)
+    model, b = LPN(SMALL), _batch()
+    off = training_losses(model, b.inputs, b.outputs, LossConfig())
+    assert off.commit > 0
+    assert torch.allclose(off.total, off.dec + off.exec + LossConfig().beta * off.kl)
+    on = training_losses(model, b.inputs, b.outputs, LossConfig(lambda_commit=0.1))
+    assert torch.allclose(on.total, on.dec + on.exec + 0.1 * on.commit + LossConfig().beta * on.kl)
+
+
 def test_kl_zero_at_prior():
     assert kl_std_normal(torch.zeros(3, 2), torch.zeros(3, 2)).abs().max() == 0
 

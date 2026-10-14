@@ -6,7 +6,7 @@ staged (configs/stage*.yaml):
   1. frozen   -- mode=probe, init=pretrained: train only the MLP head on the
                  frozen backbone's z.
   2. finetune -- mode=joint, init=pretrained: light fine-tune of all weights
-                 on L_dec + lambda_exec L_exec + lambda_commit L_commit + beta L_KL.
+                 on L_dec + lambda_exec L_exec + beta L_KL (+ lambda_commit L_commit, off by default).
   3. scratch  -- mode=joint, init=scratch: the same model trained from random init.
 The vanilla-LPN baseline is the pretrained checkpoint itself (evaluated, not trained).
 """
@@ -86,10 +86,16 @@ class LossConfig(_Strict):
     """Per-pair terms use the paper's scale: L_dec = shape CE + mean over the
     16 grid cells; L_exec is the executed grid's mean per-cell NLL;
     L_commit is the mean entropy of the 4 tile cells. beta defaults to the
-    checkpoint's own KL coefficient."""
+    checkpoint's own KL coefficient.
+
+    L_commit is off by default (lambda_commit = 0): L_exec is already the
+    tile's cross-entropy, which sharpens it toward the correct colors, while
+    L_commit only rewards confidence in whatever the head currently predicts
+    (and would make 'entropy falls during search' circular). Set
+    lambda_commit > 0 to turn it back on."""
 
     lambda_exec: float = 1.0
-    lambda_commit: float = 0.1
+    lambda_commit: float = 0.0
     beta: float = 1e-3
 
 

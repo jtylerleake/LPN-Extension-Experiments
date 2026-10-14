@@ -33,7 +33,9 @@ def test_stage_configs_differ_only_where_intended():
     assert (s1.train.mode, s1.train.init) == ("probe", "pretrained")
     assert (s2.train.mode, s2.train.init) == ("joint", "pretrained")
     assert (s3.train.mode, s3.train.init) == ("joint", "scratch")
-    assert s1.model == s2.model == s3.model == ModelConfig()
+    # stage 1's head is the head sweep's winner; stages 2/3 keep the default head for now
+    assert s2.model == s3.model == ModelConfig()
+    assert s1.model.backbone() == s2.model.backbone()
     assert s1.loss == s2.loss == s3.loss
 
 

@@ -5,7 +5,7 @@ so a pair's (mu, logvar) depends only on its tile and anchor -- 6,561 tiles x 9 
 59,049 pairs. `EncodingCache` encodes them all once; a training step is then a lookup plus the
 head. The objective is stage 1's (training_losses, probe mode): each pair's z is the
 leave-one-out mean of the other pairs' sampled latents, and the loss is
-lambda_exec * L_exec + lambda_commit * L_commit.
+lambda_exec * L_exec (+ lambda_commit * L_commit, off by default).
 
 Tile splits: training tiles as in every run (split_tile_ids(0.1, 0)). The 656 held-out tiles are
 split in half: validation ranks configurations, test is scored only in round C.
@@ -44,7 +44,7 @@ DEPTHS, WIDTHS, RESIDUAL_FROM_DEPTH = (2, 3, 4, 6), (128, 256, 512, 1024), 4
 LRS, STEPS, ACTIVATIONS, SEEDS, TOP_K = (3e-4, 1e-3, 3e-3), (50_000, 150_000), ("relu", "silu"), (0, 1, 2), 3
 ROUND_A_TRAINING = {"activation": "relu", "lr": 1e-3, "steps": 50_000, "seed": 0}
 HEAD_KEYS = ("depth", "width", "residual")
-STAGE1_LOSS = LossConfig()  # stage 1's loss weights (lambda_exec 1.0, lambda_commit 0.1)
+STAGE1_LOSS = LossConfig()  # stage 1's loss weights (lambda_exec 1.0, lambda_commit 0)
 
 
 def split_heldout(heldout_ids: torch.Tensor, seed: int = VAL_TEST_SEED) -> tuple[torch.Tensor, torch.Tensor]:
@@ -140,8 +140,9 @@ def run(spec: dict, cache: EncodingCache, splits: Splits, loss_cfg: LossConfig, 
         z = loo_mean(mu + (0.5 * logvar).exp() * torch.randn(mu.shape, generator=gen, device=dev))
         logits = head(z)
         target = cache.tiles[tile][:, None].expand(-1, NUM_PAIRS, -1)
-        loss = (loss_cfg.lambda_exec * tile_exec_nll(logits, target).mean()
-                + loss_cfg.lambda_commit * commit_entropy(logits).mean())
+        loss = loss_cfg.lambda_exec * tile_exec_nll(logits, target).mean()
+        if loss_cfg.lambda_commit:
+            loss = loss + loss_cfg.lambda_commit * commit_entropy(logits).mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(head.parameters(), GRAD_CLIP)

@@ -6,10 +6,12 @@ hyperparameters (KL coefficient, latent-search lr) carry over:
   (Decoder.nll, the original's per-pair loss);
 - L_exec per pair = mean over the 16 cells of the executed grid's NLL
   (architecture 2 executes with g(z)'s soft anchor map instead of FIND);
-- L_commit = mean over the 4 tile cells of the soft tile's entropy;
+- L_commit = mean over the 4 tile cells of the soft tile's entropy
+  (optional: off by default, lambda_commit = 0, see LossConfig);
 - L_KL per pair = KL(q(z | pair) || N(0, I)).
 Training averages every term over pairs and tasks:
-  L = L_dec + lambda_exec * L_exec + lambda_commit * L_commit + beta * L_KL
+  L = L_dec + lambda_exec * L_exec + beta * L_KL [+ lambda_commit * L_commit]
+The commitment entropy is still computed and logged as a diagnostic.
 The test-time search objective sums over context pairs instead (as the
 original's gradient ascent does), so its lr 0.1 applies unchanged.
 """
@@ -64,7 +66,7 @@ def context_loss(
     lambda_exec: float, lambda_commit: float,
 ) -> torch.Tensor:
     """Per-task objective (to minimize) of one shared z on its context pairs:
-    sum_i [L_dec + lambda_exec L_exec + lambda_commit L_commit]. inputs/outputs
+    sum_i [L_dec + lambda_exec L_exec (+ lambda_commit L_commit)]. inputs/outputs
     (B, P, 4, 4), z (B, d) -> (B,). Used by test-time latent optimization.
     """
     z_pairs = z[:, None].expand(-1, inputs.shape[1], -1)
@@ -76,7 +78,8 @@ def context_loss(
             anchor_logits = anchor_logits[:, None].expand(-1, n, -1)
         ex = exec_nll(logits[:, None].expand(-1, n, -1, -1), inputs, outputs, anchor_logits)
         loss = loss + lambda_exec * ex.sum(1)
-        loss = loss + lambda_commit * n * commit_entropy(logits)
+        if lambda_commit:
+            loss = loss + lambda_commit * n * commit_entropy(logits)
     return loss
 
 
@@ -119,7 +122,8 @@ def loo_latent_steps(
         if loss_cfg.lambda_exec or loss_cfg.lambda_commit:
             logits, anchor_logits = model.program_logits(z_ij)
             loss = loss + loss_cfg.lambda_exec * exec_nll(logits, x, y, anchor_logits)
-            loss = loss + loss_cfg.lambda_commit * commit_entropy(logits)
+            if loss_cfg.lambda_commit:
+                loss = loss + loss_cfg.lambda_commit * commit_entropy(logits)
         (grad,) = torch.autograd.grad((loss * others).sum(), z_leaf)
         z = z - lr * clip_per_row(grad, grad_clip).detach()
     return z
@@ -138,7 +142,8 @@ def training_losses(
     probe: the same z0^(i), detached (encoder/decoder frozen); only the heads'
       terms are trained. dec and kl are reported as 0.
     In architecture 2 the anchor head is trained only through L_exec (the
-    commitment term covers the tile alone).
+    commitment term covers the tile alone). `commit` is always reported (as a
+    diagnostic) but enters `total` only when lambda_commit > 0.
     """
     mu, logvar = model.encoder(inputs, outputs)
     z = loo_mean(sample_latents(mu, logvar))
@@ -156,5 +161,7 @@ def training_losses(
         commit = commit_entropy(logits).mean()
     else:
         ex = commit = zero
-    total = dec + loss_cfg.lambda_exec * ex + loss_cfg.lambda_commit * commit + loss_cfg.beta * kl
+    total = dec + loss_cfg.lambda_exec * ex + loss_cfg.beta * kl
+    if loss_cfg.lambda_commit:
+        total = total + loss_cfg.lambda_commit * commit
     return LossTerms(total, dec, ex, commit, kl)

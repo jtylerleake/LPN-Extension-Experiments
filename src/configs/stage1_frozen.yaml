@@ -1,9 +1,15 @@
 # Stage 1: the paper's pretrained LPN, frozen; only the MLP head is trained (on its detached z).
+# Head and lr are the head sweep's winner (round C); steps cut from the sweep's 50k for speed.
 name: stage1_frozen
+model:
+  head_depth: 6
+  head_hidden: 1024
+  head_residual: true
+  head_activation: relu
 train:
   mode: probe
   init: pretrained
-  steps: 20000
+  steps: 10000
   batch_size: 256
-  lr: 1.0e-3
+  lr: 3.0e-3
   warmup_steps: 500
